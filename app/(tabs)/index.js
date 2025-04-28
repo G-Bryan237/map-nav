@@ -70,6 +70,127 @@ const calculateHeading = (start, end) => {
   return (bearing + 360) % 360;
 };
 
+// Add this function
+const calculateBearing = (prevPos, currentPos) => {
+  if (!prevPos || !currentPos) return 0;
+  
+  const startLat = prevPos.latitude * Math.PI / 180;
+  const startLng = prevPos.longitude * Math.PI / 180;
+  const endLat = currentPos.latitude * Math.PI / 180;
+  const endLng = currentPos.longitude * Math.PI / 180;
+  
+  const dLng = endLng - startLng;
+  
+  const y = Math.sin(dLng) * Math.cos(endLat);
+  const x = Math.cos(startLat) * Math.sin(endLat) -
+            Math.sin(startLat) * Math.cos(endLat) * Math.cos(dLng);
+  
+  const bearing = Math.atan2(y, x) * 180 / Math.PI;
+  return (bearing + 360) % 360;
+};
+
+// Add after calculateBearing function but before createEnhancedRoutePoints
+const getDistance = (start, end) => {
+  const R = 6371e3; // Earth's radius in meters
+  const φ1 = start.latitude * Math.PI / 180;
+  const φ2 = end.latitude * Math.PI / 180;
+  const Δφ = (end.latitude - start.latitude) * Math.PI / 180;
+  const Δλ = (end.longitude - start.longitude) * Math.PI / 180;
+
+  const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+           Math.cos(φ1) * Math.cos(φ2) *
+           Math.sin(Δλ/2) * Math.sin(Δλ/2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+  return R * c; // Distance in meters
+};
+
+// Add this function after getDistance function
+const createEnhancedRoutePoints = (routeCoords, spacing = 20) => {
+  if (!routeCoords || routeCoords.length < 2) return [];
+  
+  const enhancedPoints = [];
+  
+  for (let i = 0; i < routeCoords.length - 1; i++) {
+    const startPoint = routeCoords[i];
+    const endPoint = routeCoords[i + 1];
+    
+    enhancedPoints.push(startPoint);
+    
+    const d = getDistance(startPoint, endPoint);
+    if (d < spacing) continue;
+    
+    const steps = Math.floor(d / spacing);
+    for (let step = 1; step < steps; step++) {
+      const fraction = step / steps;
+      enhancedPoints.push({
+        latitude: startPoint.latitude + (endPoint.latitude - startPoint.latitude) * fraction,
+        longitude: startPoint.longitude + (endPoint.longitude - startPoint.longitude) * fraction
+      });
+    }
+  }
+  
+  enhancedPoints.push(routeCoords[routeCoords.length - 1]);
+  return enhancedPoints;
+};
+
+const isTurningPoint = (prevPoint, currentPoint, nextPoint, threshold = 30) => {
+  if (!prevPoint || !currentPoint || !nextPoint) return false;
+  
+  const heading1 = calculateHeading(prevPoint, currentPoint);
+  const heading2 = calculateHeading(currentPoint, nextPoint);
+  
+  let angle = Math.abs(heading2 - heading1);
+  if (angle > 180) angle = 360 - angle;
+  
+  return angle > threshold;
+};
+
+const getArrowType = (prevPoint, currentPoint, nextPoint) => {
+  if (!prevPoint || !currentPoint || !nextPoint) return 'chevron-up';
+  
+  const heading1 = calculateHeading(prevPoint, currentPoint);
+  const heading2 = calculateHeading(currentPoint, nextPoint);
+  
+  let angle = heading2 - heading1;
+  if (angle < -180) angle += 360;
+  if (angle > 180) angle -= 360;
+  
+  if (Math.abs(angle) < 20) return 'chevron-up';
+  if (angle > 0) {
+    return angle > 70 ? 'chevron-right' : 'chevron-up';
+  } else {
+    return angle < -70 ? 'chevron-left' : 'chevron-up';
+  }
+};
+
+// Add EnhancedDirectionArrow component before App component
+const EnhancedDirectionArrow = ({ marker }) => {
+  const arrowHeading = calculateHeading(marker.prevPoint, marker.nextPoint);
+  const arrowType = getArrowType(marker.prevPoint, marker.coordinate, marker.nextPoint);
+  
+  return (
+    <Marker
+      coordinate={marker.coordinate}
+      anchor={{ x: 0.5, y: 0.5 }}
+      rotation={arrowHeading}
+      tracksViewChanges={false}
+    >
+      <View style={[
+        carStyles.routeArrow,
+        isTurningPoint(marker.prevPoint, marker.coordinate, marker.nextPoint) && 
+        carStyles.turningArrow
+      ]}>
+        <FontAwesome5 
+          name={arrowType} 
+          size={12} 
+          color="#FFFFFF" 
+        />
+      </View>
+    </Marker>
+  );
+};
+
 // SearchBar Component extracted for better organization
 const SearchBar = ({ 
   isSearchVisible, 
@@ -235,6 +356,36 @@ const GoogleMapsCompass = ({ heading }) => {
   );
 };
 
+// Custom Car Marker Component
+const CarMarker = ({ coordinate, heading }) => {
+  return (
+    <Marker
+      coordinate={coordinate}
+      anchor={{ x: 0.5, y: 0.5 }}
+      rotation={heading}
+    >
+      <View style={carStyles.carContainer}>
+        <FontAwesome5 name="car" size={24} color="#4285F4" />
+      </View>
+    </Marker>
+  );
+};
+
+// Custom Arrow Marker Component
+const ArrowMarker = ({ coordinate, heading }) => {
+  return (
+    <Marker
+      coordinate={coordinate}
+      anchor={{ x: 0.5, y: 0.5 }}
+      rotation={heading}
+    >
+      <View style={carStyles.arrowContainer}>
+        <FontAwesome5 name="location-arrow" size={24} color="#4285F4" />
+      </View>
+    </Marker>
+  );
+};
+
 export default function App() {
   const [location, setLocation] = useState(null);
   const [errorMsg, setErrorMsg] = useState(null);
@@ -253,11 +404,16 @@ export default function App() {
   const [locationSubscription, setLocationSubscription] = useState(null);
   const [isLoadingLocation, setIsLoadingLocation] = useState(true);
   const [accuracyLevel, setAccuracyLevel] = useState('Standard');
-  const [mapTheme, setMapTheme] = useState('standard'); // Add this
-  const [routes, setRoutes] = useState([]); // Add this for multiple routes
-  const [selectedRouteIndex, setSelectedRouteIndex] = useState(0); // Add this
+  const [mapTheme, setMapTheme] = useState('standard');
+  const [routes, setRoutes] = useState([]);
+  const [selectedRouteIndex, setSelectedRouteIndex] = useState(0);
+  const [markerType, setMarkerType] = useState('car'); // 'car' or 'arrow'
+  const [calculatedHeading, setCalculatedHeading] = useState(0); // Add this
+  const [enhancedRoutePoints, setEnhancedRoutePoints] = useState([]);
+  const [routeDirectionMarkers, setRouteDirectionMarkers] = useState([]);
+  const lastKnownPosition = useRef(null); // Add this
   const mapRef = useRef(null);
-  const lastCameraUpdate = useRef(null);  // Moved inside component
+  const lastCameraUpdate = useRef(null);
   const searchTimeout = useRef(null);
   
   // Request location permissions and get initial location
@@ -289,6 +445,23 @@ export default function App() {
             timeInterval: 1000,
           },
           (newLocation) => {
+            // Calculate heading based on previous position
+            if (lastKnownPosition.current) {
+              const newHeading = calculateBearing(
+                lastKnownPosition.current,
+                newLocation.coords
+              );
+              if (!isNaN(newHeading)) {
+                setCalculatedHeading(newHeading);
+              }
+            }
+            
+            // Update last known position
+            lastKnownPosition.current = { 
+              latitude: newLocation.coords.latitude, 
+              longitude: newLocation.coords.longitude 
+            };
+            
             setLocation(newLocation.coords);
             setAccuracyLevel(`±${Math.round(newLocation.coords.accuracy)}m`);
             if (isNavigating) {
@@ -446,6 +619,23 @@ export default function App() {
         setDirections(allRoutes[0].steps);
         setDistance(allRoutes[0].distance);
         setDuration(allRoutes[0].duration);
+
+        // Add after setting routes
+        const enhancedPoints = createEnhancedRoutePoints(allRoutes[0].coordinates);
+        setEnhancedRoutePoints(enhancedPoints);
+        
+        const directionMarkers = [];
+        for (let i = 1; i < enhancedPoints.length - 1; i++) {
+          if (i % 5 === 0 || isTurningPoint(enhancedPoints[i-1], enhancedPoints[i], enhancedPoints[i+1])) {
+            directionMarkers.push({
+              id: `marker-${i}`,
+              coordinate: enhancedPoints[i],
+              prevPoint: enhancedPoints[i-1],
+              nextPoint: enhancedPoints[i+1]
+            });
+          }
+        }
+        setRouteDirectionMarkers(directionMarkers);
       } else {
         Alert.alert('Route Not Found', 'Could not find a route to this destination');
       }
@@ -523,11 +713,24 @@ export default function App() {
           latitude: location.latitude,
           longitude: location.longitude,
         },
-        zoom: 18,
-        heading: heading,
-        pitch: 60,
-        duration: 1000,
+        zoom: 16,
+        heading: calculatedHeading,
+        pitch: 0,
+        duration: 500,
       });
+      
+      setTimeout(() => {
+        mapRef.current.animateCamera({
+          center: {
+            latitude: location.latitude,
+            longitude: location.longitude,
+          },
+          zoom: 19,
+          heading: calculatedHeading,
+          pitch: 75,
+          duration: 1000,
+        });
+      }, 700);
     }
   };
 
@@ -576,21 +779,6 @@ export default function App() {
         );
       }
     }
-  };
-
-  const getDistance = (start, end) => {
-    const R = 6371e3; // Earth's radius in meters
-    const φ1 = start.latitude * Math.PI / 180;
-    const φ2 = end.latitude * Math.PI / 180;
-    const Δφ = (end.latitude - start.latitude) * Math.PI / 180;
-    const Δλ = (end.longitude - start.longitude) * Math.PI / 180;
-
-    const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
-             Math.cos(φ1) * Math.cos(φ2) *
-             Math.sin(Δλ/2) * Math.sin(Δλ/2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-
-    return R * c; // Distance in meters
   };
 
   const getManeuverIcon = (maneuver) => {
@@ -681,7 +869,40 @@ export default function App() {
                   pinColor="red"
                 />
               )}
-              
+
+              {/* Initial Starting Point Marker */}
+              {routeCoordinates.length > 0 && (
+                <Marker
+                  coordinate={routeCoordinates[0]}
+                  anchor={{ x: 0.5, y: 0.5 }}
+                >
+                  <View style={carStyles.startMarker}>
+                    <FontAwesome5 
+                      name={markerType === 'car' ? 'car' : 'location-arrow'} 
+                      size={20} 
+                      color="#FFFFFF" 
+                    />
+                  </View>
+                </Marker>
+              )}
+
+              {/* Dotted Line from Current Location to Starting Point */}
+              {routeCoordinates.length > 0 && location && (
+                <Polyline
+                  coordinates={[
+                    {
+                      latitude: location.latitude,
+                      longitude: location.longitude,
+                    },
+                    routeCoordinates[0]
+                  ]}
+                  strokeWidth={3}
+                  strokeColor="#4285F4"
+                  lineDashPattern={[5, 5]}
+                  zIndex={2}
+                />
+              )}
+
               {/* Route Polyline */}
               {routeCoordinates.length > 0 && (
                 <Polyline
@@ -693,6 +914,24 @@ export default function App() {
               {routeCoordinates.length > 0 && (
                 <RouteArrows coordinates={routeCoordinates} />
               )}
+
+              {/* Enhanced Route Polyline */}
+              {routeCoordinates.length > 0 && (
+                <Polyline
+                  coordinates={routeCoordinates}
+                  strokeWidth={isNavigating ? 12 : 4}
+                  strokeColor={isNavigating ? "rgba(66, 133, 244, 0.9)" : "#4285F4"}
+                  zIndex={1}
+                />
+              )}
+
+              {/* Enhanced Route Direction Arrows */}
+              {isNavigating && routeDirectionMarkers.map((marker) => (
+                <EnhancedDirectionArrow 
+                  key={marker.id} 
+                  marker={marker} 
+                />
+              ))}
 
               {/* Show alternative routes */}
               {routes.map((route, index) => (
@@ -776,7 +1015,7 @@ export default function App() {
 
             <TouchableOpacity style={styles.circleButton} onPress={toggleMapTheme}>
               <FontAwesome5 
-                name={mapTheme === 'standard' ? 'satellite' : 'map'} 
+                name={mapTheme === 'standard' ? 'satellite' : 'standard'} 
                 size={20} 
                 color="#4285F4" 
               />
@@ -784,6 +1023,18 @@ export default function App() {
 
             <TouchableOpacity style={styles.circleButton} onPress={recenterMap}>
               <MaterialIcons name="my-location" size={26} color="#4285F4" />
+            </TouchableOpacity>
+
+            {/* Add the new marker type toggle button */}
+            <TouchableOpacity 
+              style={styles.circleButton} 
+              onPress={() => setMarkerType(markerType === 'car' ? 'arrow' : 'car')}
+            >
+              <FontAwesome5 
+                name={markerType === 'car' ? 'location-arrow' : 'car'} 
+                size={20} 
+                color="#4285F4" 
+              />
             </TouchableOpacity>
 
             {/* Compass (only visible in non-navigation mode) */}
@@ -1217,5 +1468,89 @@ const compassStyles = StyleSheet.create({
     fontSize: 10,
     fontWeight: 'bold',
     color: '#4285F4',
+  },
+});
+
+const carStyles = StyleSheet.create({
+  carContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'white',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#4285F4',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+  },
+  arrowContainer: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'white',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#4285F4',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+  },
+  routeArrow: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(66, 133, 244, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    elevation: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 2,
+  },
+  turningArrow: {
+    backgroundColor: 'rgba(234, 67, 53, 0.9)',
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+  },
+  startArrow: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: 'rgba(52, 168, 83, 0.9)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 3,
+    borderColor: '#FFFFFF',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.4,
+    shadowRadius: 3,
+  },
+  startMarker: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: '#34A853',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 2,
+    borderColor: '#FFFFFF',
+    elevation: 5,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
   },
 });
